@@ -624,24 +624,46 @@ class OaseController:
 
     def connect(self) -> Discovery:
         self._tls = TlsCallbackServer(self.local_ip, self.tls_port, self.timeout)
-        self._tls.start()
-        discovery_packet = self._udp_request(DISCOVERY)
-        discovery = parse_discovery(discovery_packet.payload)
-        LOG.info("Detected %s (%s), serial %s", discovery.long_name, discovery.name, discovery.serial_number)
-        if not discovery.long_name.startswith("FM-Master EGC"):
-            raise OaseError(f"Unsupported device: {discovery.long_name}")
+        try:
+            self._tls.start()
+            discovery_packet = self._udp_request(DISCOVERY)
+            discovery = parse_discovery(discovery_packet.payload)
+            LOG.info(
+                "Detected %s (%s), serial %s",
+                discovery.long_name,
+                discovery.name,
+                discovery.serial_number,
+            )
+            if not discovery.long_name.startswith("FM-Master EGC"):
+                raise OaseError(f"Unsupported device: {discovery.long_name}")
 
-        tcp_payload = struct.pack("<BHI", 0, self.tls_port, int(time.time()) & 0xFFFFFFFF)
-        tcp_reply = self._udp_request(TCP_REQ, tcp_payload)
-        if len(tcp_reply.payload) < 2 or tcp_reply.payload[0] != 1:
-            raise OaseError(f"Controller rejected TLS callback request: {tcp_reply.payload.hex()}")
+            tcp_payload = struct.pack(
+                "<BHI",
+                0,
+                self.tls_port,
+                int(time.time()) & 0xFFFFFFFF,
+            )
+            tcp_reply = self._udp_request(TCP_REQ, tcp_payload)
+            if len(tcp_reply.payload) < 2 or tcp_reply.payload[0] != 1:
+                raise OaseError(
+                    "Controller rejected TLS callback request: "
+                    f"{tcp_reply.payload.hex()}"
+                )
 
-        self._tls.wait_connected()
-        pw_reply = self._tls_request(PASSWORD_CHECK, make_password_payload(self.password))
-        if len(pw_reply.payload) != 1 or pw_reply.payload[0] != 1:
-            raise OaseError("Controller password authentication failed")
-        LOG.info("Authenticated")
-        return discovery
+            self._tls.wait_connected()
+            pw_reply = self._tls_request(
+                PASSWORD_CHECK,
+                make_password_payload(self.password),
+            )
+            if len(pw_reply.payload) != 1 or pw_reply.payload[0] != 1:
+                raise OaseError("Controller password authentication failed")
+            LOG.info("Authenticated")
+            return discovery
+        except BaseException:
+            # A failed discovery, callback, TLS, or authentication attempt must
+            # release the callback port before callers retry the connection.
+            self.close()
+            raise
 
     def _tls_request(self, packet_type: int, payload: bytes = b"") -> Packet:
         if self._tls is None:

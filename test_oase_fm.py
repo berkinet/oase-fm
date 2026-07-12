@@ -2,7 +2,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import oase_fm
 
@@ -11,6 +11,18 @@ ROOT = Path(__file__).resolve().parent
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_failed_connect_releases_callback_listener(self):
+        controller = oase_fm.OaseController("192.0.2.1", "192.0.2.2", "pw")
+        listener = Mock()
+        listener.start.side_effect = TimeoutError("timed out")
+
+        with patch.object(oase_fm, "TlsCallbackServer", return_value=listener):
+            with self.assertRaises(TimeoutError):
+                controller.connect()
+
+        listener.close.assert_called_once_with()
+        self.assertIsNone(controller._tls)
+
     def test_packet_round_trip(self):
         protocol = oase_fm.Protocol()
         packet = protocol.make_packet(oase_fm.GET_LIVE_SCENE, b"payload")
