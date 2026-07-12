@@ -1,0 +1,550 @@
+OASE FM-Master Local Control Protocol Notes
+===========================================
+
+Acknowledgements
+----------------
+The working Python implementation of the FM-Master UDP/TLS connection,
+authentication sequence, live-scene state reading, and socket/dimmer control
+was based on mr_suw's ioBroker.oasecontrol project, published under the MIT
+License:
+
+  https://github.com/mr-suw/ioBroker.oasecontrol
+
+That project supplied the essential practical foundation for communicating
+with the controller. The additional EGC/RDM discovery and control work
+documented below was derived from the decompiled OASE application libraries
+and confirmed against a real FM-Master EGC Home and AquaMax 5000 pump.
+
+
+Context
+-------
+These notes summarize the local control protocol recovered from the OASE
+Control iOS application running on Apple silicon.
+
+Relevant application bundle:
+  /Applications/OASE Control.app/Wrapper/Oase.App.iOS.app
+
+Relevant assemblies:
+  Oase.Communication.dll
+  Oase.Domain.dll
+  Oase.Networking.dll
+
+The app uses a local TCP connection wrapped in TLS through .NET SslStream.
+The commands below describe the unencrypted ONet protocol carried inside that
+TLS connection.
+
+
+1. High-level socket-control command path
+-----------------------------------------
+
+Ordinary socket switching is performed by SocketOnOffTransmitter, which creates:
+
+  SetLiveSceneRequest
+  {
+      ApplianceId = ApplianceId.FmMasterSockets(),
+      Countdown = 0,
+      Scene = new GardenFmMasterSocketSceneSet(
+          (GardenControlUnitSocket)socketNumber,
+          value
+      )
+  }
+
+The dimmer level is controlled by DimmerSocketTransmitter, which creates:
+
+  SetLiveSceneRequest
+  {
+      ApplianceId = ApplianceId.FmMasterSockets(),
+      Countdown = 0,
+      Scene = GardenFmMasterSocketSceneSet.ForDimmer(value)
+  }
+
+Both use SetLiveSceneRequest.
+
+
+2. SetLiveScene packet type
+---------------------------
+
+Decimal:
+  50176
+
+Hexadecimal:
+  0xC400
+
+On the wire, little-endian:
+  00 C4
+
+
+3. ONet version 2 frame format
+------------------------------
+
+ONetV2Packet has a 16-byte header.
+
+Offset  Size  Meaning
+------  ----  -----------------------------------------
+0       4     Start delimiter
+4       4     Payload length, uint32 little-endian
+8       1     Protocol version
+9       1     Transaction number
+10      2     Packet type, uint16 little-endian
+12      1     Total number of fragments
+13      1     Fragment number
+14      2     Reserved, normally zero
+16      N     Payload data
+
+Start delimiter:
+  5C 23 4F 41
+
+ASCII:
+  \#OA
+
+Protocol version:
+  02
+
+There is no ONet v2 checksum.
+
+
+4. SetLiveSceneRequest payload
+------------------------------
+
+SetLiveSceneRequest uses a 13-byte payload.
+
+Offset  Size  Meaning
+------  ----  -----------------------------------------
+0       1     Appliance IdType
+1       4     Appliance ID, uint32 little-endian
+5       4     Countdown, uint32 little-endian
+9       1     Scene type
+10      1     Scene data length
+11      1     Socket selector
+12      1     Power or dimmer value
+
+For FM-Master socket control:
+
+  Appliance IdType:
+    FmMasterSockets = 4
+
+  Appliance ID:
+    0
+
+  Countdown:
+    0
+
+  Scene type:
+    GardenFmMasterSocketSceneSet = 100 decimal = 0x64
+
+  Scene data length:
+    2
+
+Payload template:
+
+  04
+  00 00 00 00
+  00 00 00 00
+  64
+  02
+  SS
+  PP
+
+where:
+
+  SS = socket selector
+  PP = power or dimmer value
+
+
+5. Socket selector values
+-------------------------
+
+  00  Socket1
+  01  Socket2
+  02  Socket3
+  03  DimmerOnOff
+  04  DimmerValue
+
+The controller therefore has three ordinary on/off sockets and one dimmer
+outlet with separate on/off and level controls.
+
+
+6. Ordinary on/off values
+-------------------------
+
+  00  Off
+  FF  On
+
+
+7. Dimmer encoding
+------------------
+
+The FM-Master dimmer uses OASE's OnetByte representation.
+
+  0%      -> 00
+  1-99%   -> percentage * 2
+  100%    -> FF
+
+Examples:
+
+  0%    = 00
+  25%   = 32
+  50%   = 64
+  75%   = 96
+  99%   = C6
+  100%  = FF
+
+
+8. Complete socket-control packet template
+------------------------------------------
+
+  5C234F410D00000002TT00C4000000000400000000000000006402SSPP
+
+where:
+
+  TT = transaction number
+  SS = socket selector
+  PP = value
+
+
+9. Transaction handling
+-----------------------
+
+The transaction number is one byte.
+
+A reply is accepted when both match:
+
+  expected reply packet type
+  request transaction number
+
+
+10. Transport and authentication
+--------------------------------
+
+The FM-Master is initially contacted by UDP on port 5959.
+
+The Python program opens a TLS callback listener, normally on port 5999.
+The FM-Master then connects back to the program.
+
+The working sequence is:
+
+  1. UDP discovery
+  2. TCP callback request
+  3. FM-Master connects to the local TLS listener
+  4. TLS session is established
+  5. The 74-character app password is sent
+  6. ONet commands are exchanged inside TLS
+
+The password is supplied by either:
+
+  --password
+
+or:
+
+  OASE_PASSWORD
+
+It is not hard-coded.
+
+The controller requires compatibility with older TLS versions and cipher
+suites. Modern Python may display a TLS 1.0 deprecation warning.
+
+
+11. State reading
+-----------------
+
+FM-Master socket state is read using:
+
+  GetLiveSceneRequest
+  GetLiveSceneReply
+  GardenFmMasterSocketSceneGet
+  FmMasterSocketsState
+
+Returned state fields are:
+
+  Socket1
+  Socket2
+  Socket3
+  SocketDimmer
+  DimmerValue
+
+
+12. Working Python socket commands
+----------------------------------
+
+Examples:
+
+  status
+
+  set 1 on
+  set 2 off
+  set 4 on
+  set dimmer 128
+
+Multiple operations may be combined:
+
+  set 4 on, 3 off, dimmer 128
+
+
+13. EGC device discovery
+------------------------
+
+EGC discovery uses:
+
+  Request packet type:
+    0x7000
+
+  Reply packet type:
+    0x70FF
+
+A normal discovery request uses a one-byte payload:
+
+  00
+
+The confirmed discovery reply begins with:
+
+Offset  Size  Meaning
+------  ----  -----------------------------------------
+0       4     Discover-only-new flag, uint32 little-endian
+4       4     Number of discovered devices, uint32 little-endian
+8       12    First device record
+
+Each 12-byte device record contains:
+
+Offset  Size  Meaning
+------  ----  -----------------------------------------
+0       4     Article number, uint32 little-endian
+4       4     Device identifier, uint32 little-endian
+8       2     Manufacturer identifier, uint16 little-endian
+10      2     Subdevice count, uint16 little-endian
+
+The tested device returned:
+
+  UID:
+    4F41:55B02E2B
+
+  Article number:
+    75923
+
+  Device identifier:
+    1437609515
+
+  Manufacturer identifier:
+    0x4F41
+
+  Subdevice count:
+    0
+
+The six-byte RDM UID is formed from the manufacturer identifier followed by
+the device identifier, both represented in big-endian UID order.
+
+
+14. RDM transport through ONet
+------------------------------
+
+RDM uses these ONet packet types:
+
+  Request:
+    0x7100
+
+  Reply:
+    0x71FF
+
+The ONet payload contains a standard RDM frame beginning:
+
+  CC 01
+
+The standard two-byte RDM checksum is present at the end of the RDM frame.
+
+The 0x71FF OASE reply payload is padded to 257 bytes. The true RDM message
+length comes from the RDM message-length field; remaining zero bytes are
+padding.
+
+
+15. Confirmed standard RDM queries
+---------------------------------
+
+DEVICE_INFO:
+
+  PID:
+    0x0060
+
+  Returned data:
+    010000BA040001170A1400020101002100000E
+
+Decoded:
+
+  Protocol version:
+    0x0100
+
+  Device model ID:
+    0x00BA
+
+  Product category:
+    0x0400
+
+  Software version ID:
+    0x01170A14
+
+  DMX footprint:
+    2
+
+  Current personality:
+    1
+
+  Personality count:
+    1
+
+  DMX start address:
+    33
+
+  Subdevice count:
+    0
+
+  Sensor count:
+    14
+
+
+DEVICE_MODEL_DESCRIPTION:
+
+  PID:
+    0x0080
+
+  Returned text:
+    AQUAMAX 5000
+
+
+SOFTWARE_VERSION_LABEL:
+
+  PID:
+    0x00C0
+
+  Returned text:
+    FOC2_AQM_2023-10-20
+
+
+16. Confirmed AquaMax on/off control
+------------------------------------
+
+The AquaMax on/off parameter is:
+
+  PID:
+    0x1010
+
+GET returns one byte:
+
+  00  Off
+  FF  On
+
+SET uses the same values:
+
+  00  Turn off
+  FF  Turn on
+
+Both operations were successfully tested.
+
+
+17. Confirmed AquaMax power control
+-----------------------------------
+
+The AquaMax power parameter is:
+
+  PID:
+    0x8039
+
+It uses one byte from 00 through FF.
+
+The confirmed conversion from requested percentage to raw byte is:
+
+  raw = floor(percent * 255 / 100)
+
+Examples:
+
+  1%    -> 02
+  25%   -> 3F
+  50%   -> 7F
+  75%   -> BF
+  100%  -> FF
+
+The OASE app converts the raw value back to a displayed percentage using
+upward rounding:
+
+  percent = ceil(raw * 100 / 255)
+
+Confirmed examples:
+
+  7F -> 50%
+  80 -> 51%
+  FF -> 100%
+
+A SET of PID 0x8039 with data 7F was accepted and displayed by the app as 50%.
+
+
+18. Current EGC command-line interface
+--------------------------------------
+
+For the current installation, where exactly one EGC device is attached, the
+standalone controller refers to it simply as:
+
+  egc
+
+Supported commands:
+
+  set egc on
+  set egc off
+  set egc power 50
+  set egc on, power 50
+
+The combined command was successfully tested and returned:
+
+  egc=on
+  power=50
+  uid=4F41:55B02E2B
+
+The program discovers the single EGC device automatically and uses its UID.
+
+
+19. Reliability observation
+---------------------------
+
+Occasional timeouts were observed when reconnecting and issuing commands in
+rapid succession.
+
+A production implementation should treat a timeout as retryable:
+
+  1. close UDP and TLS sockets
+  2. wait briefly
+  3. reconnect and authenticate
+  4. retry once
+
+
+20. Indigo plugin implications
+------------------------------
+
+The planned Indigo plugin should store these as plugin configuration values:
+
+  FM-Master IP address
+  local callback IP address
+  OASE 74-character password
+
+The password field should be concealed.
+
+Indigo device definitions can later map logical Indigo devices to:
+
+  FM-Master sockets
+  FM-Master dimmer channel
+  EGC device UIDs
+  possible EGC subdevices
+
+The standalone CLI does not need persistent EGC names at this stage.
+
+
+21. Updated conclusions
+-----------------------
+
+1. Local FM-Master socket and dimmer control is fully working.
+2. EGC discovery through 0x7000/0x70FF is working.
+3. Standard RDM GET and SET frames work through 0x7100/0x71FF.
+4. The attached device is an AquaMax 5000 with UID 4F41:55B02E2B.
+5. AquaMax on/off uses PID 0x1010 with 00 and FF.
+6. AquaMax power uses PID 0x8039 with a one-byte 0-255 scale.
+7. The tested percentage mapping is floor(percent * 255 / 100).
+8. The Python CLI now controls both FM-Master sockets and the EGC pump.
+9. The future Indigo plugin can map Indigo devices to real sockets or EGC UIDs.
+10. mr_suw's ioBroker.oasecontrol project provided the essential working basis
+    for the FM-Master local connection, authentication, and socket/dimmer
+    protocol implementation.
