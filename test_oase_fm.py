@@ -98,20 +98,20 @@ class ProtocolTests(unittest.TestCase):
     def test_get_egc_state_reads_onoff_and_power(self):
         controller = oase_fm.OaseController("192.0.2.1", "192.0.2.2", "pw")
         device = oase_fm.EgcDevice(123, 456, 0x4F41, 1)
-        decoy_rpm_definition = (
-            bytes((0, oase_fm.RDM_SENSOR_TYPE_ANGULAR_VELOCITY, 0, 0))
+        nominal_speed_definition = (
+            bytes((0, 0x0B, 0, 0))
             + struct.pack(">hhhhB", 0, 5000, 0, 5000, 0)
-            + b"Motor reference"
+            + b"NominalSpeed"
         )
         rpm_definition = (
-            bytes((2, oase_fm.RDM_SENSOR_TYPE_ANGULAR_VELOCITY, 0, 0))
+            bytes((1, 0x0B, 0, 0))
             + struct.pack(">hhhhB", 0, 5000, 0, 5000, 0)
-            + b"RPM"
+            + b"ActualSpeed"
         )
         watts_definition = (
             bytes(
                 (
-                    1,
+                    2,
                     oase_fm.RDM_SENSOR_TYPE_POWER,
                     oase_fm.RDM_SENSOR_UNIT_WATTS,
                     0,
@@ -132,13 +132,13 @@ class ProtocolTests(unittest.TestCase):
                 return Mock(parameter_data=bytes(device_info))
             if parameter_id == oase_fm.RDM_SENSOR_DEFINITION:
                 definitions = {
-                    b"\x00": decoy_rpm_definition,
-                    b"\x01": watts_definition,
-                    b"\x02": rpm_definition,
+                    b"\x00": nominal_speed_definition,
+                    b"\x01": rpm_definition,
+                    b"\x02": watts_definition,
                 }
                 return Mock(parameter_data=definitions[parameter_data])
             if parameter_id == oase_fm.RDM_SENSOR_VALUE:
-                present = 2345 if parameter_data == b"\x02" else 78
+                present = 2345 if parameter_data == b"\x01" else 78
                 return Mock(
                     parameter_data=parameter_data
                     + struct.pack(">hhhh", present, present, present, present)
