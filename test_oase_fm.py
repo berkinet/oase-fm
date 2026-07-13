@@ -12,6 +12,23 @@ ROOT = Path(__file__).resolve().parent
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_password_is_redacted_from_protocol_debug_log(self):
+        server = oase_fm.TlsCallbackServer("127.0.0.1", 0)
+        server._tls_socket = Mock()
+        server._read_packet = Mock(return_value=b"reply")
+        password_payload = b"diagnostic-secret"
+        packet = oase_fm.Protocol().make_packet(
+            oase_fm.PASSWORD_CHECK, password_payload
+        )
+
+        with self.assertLogs("oase", level="DEBUG") as captured:
+            reply = server.request(packet)
+
+        log_output = "\n".join(captured.output)
+        self.assertEqual(reply, b"reply")
+        self.assertIn("PASSWORD_CHECK payload=<redacted>", log_output)
+        self.assertNotIn(password_payload.hex().upper(), log_output)
+
     def test_failed_connect_releases_callback_listener(self):
         controller = oase_fm.OaseController("192.0.2.1", "192.0.2.2", "pw")
         listener = Mock()

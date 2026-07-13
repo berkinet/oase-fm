@@ -652,7 +652,13 @@ class TlsCallbackServer:
     def request(self, packet: bytes) -> bytes:
         if self._tls_socket is None:
             raise OaseError("No TLS connection")
-        LOG.debug("TLS send: %s", packet.hex().upper())
+        packet_type = (
+            struct.unpack_from("<H", packet, 10)[0] if len(packet) >= 12 else None
+        )
+        if packet_type == PASSWORD_CHECK:
+            LOG.debug("TLS send: PASSWORD_CHECK payload=<redacted>")
+        else:
+            LOG.debug("TLS send: %s", packet.hex().upper())
         self._tls_socket.sendall(packet)
         return self._read_packet()
 
