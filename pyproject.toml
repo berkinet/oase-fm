@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oase-fm"
-version = "0.2.2"
+version = "0.2.3"
 description = "Local Python control for the OASE InScenio FM-Master EGC"
 readme = "README.md"
 requires-python = ">=3.9"

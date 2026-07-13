@@ -985,6 +985,9 @@ class OaseController:
                 continue
 
             description = definition.description.casefold()
+            compact_description = "".join(
+                character for character in description if character.isalnum()
+            )
             if "watt" in description or "consumption" in description:
                 candidate_watts_rank = 3
             elif definition.unit == RDM_SENSOR_UNIT_WATTS:
@@ -1000,7 +1003,11 @@ class OaseController:
                 watts_definition = definition
                 watts_rank = candidate_watts_rank
 
-            if any(
+            if "actualspeed" in compact_description:
+                # OASE labels the live pump-speed sensor ActualSpeed and uses
+                # the generic velocity type rather than angular velocity.
+                candidate_rpm_rank = 4
+            elif any(
                 word in description
                 for word in ("rpm", "rotation", "revolution")
             ):
