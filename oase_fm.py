@@ -57,6 +57,39 @@ RDM_GET_RESPONSE = 0x21
 RDM_SET_RESPONSE = 0x31
 RDM_SOURCE_UID = bytes.fromhex("000000000001")
 
+# Standard ANSI E1.20 RDM sensor parameter IDs and identifiers used by OASE
+# EGC pumps for live telemetry.
+RDM_DEVICE_INFO = 0x0060
+RDM_SENSOR_DEFINITION = 0x0200
+RDM_SENSOR_VALUE = 0x0201
+RDM_SENSOR_TYPE_POWER = 0x05
+RDM_SENSOR_TYPE_ANGULAR_VELOCITY = 0x15
+RDM_SENSOR_UNIT_WATTS = 0x0A
+
+RDM_PREFIX_FACTORS = {
+    0x00: 1.0,
+    0x01: 1e-1,
+    0x02: 1e-2,
+    0x03: 1e-3,
+    0x04: 1e-6,
+    0x05: 1e-9,
+    0x06: 1e-12,
+    0x07: 1e-15,
+    0x08: 1e-18,
+    0x09: 1e-21,
+    0x0A: 1e-24,
+    0x11: 1e1,
+    0x12: 1e2,
+    0x13: 1e3,
+    0x14: 1e6,
+    0x15: 1e9,
+    0x16: 1e12,
+    0x17: 1e15,
+    0x18: 1e18,
+    0x19: 1e21,
+    0x1A: 1e24,
+}
+
 
 class OaseError(RuntimeError):
     pass
@@ -130,6 +163,31 @@ class EgcState:
     device: EgcDevice
     on: bool
     power: int
+    rpm: Optional[float] = None
+    watts: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class RdmSensorDefinition:
+    sensor_number: int
+    sensor_type: int
+    unit: int
+    prefix: int
+    range_min: int
+    range_max: int
+    normal_min: int
+    normal_max: int
+    recorded_value_support: int
+    description: str
+
+
+@dataclass(frozen=True)
+class RdmSensorValue:
+    sensor_number: int
+    present: int
+    lowest: int
+    highest: int
+    recorded: int
 
 
 @dataclass(frozen=True)
@@ -446,6 +504,59 @@ def parse_rdm_message(data: bytes) -> RdmMessage:
     )
 
 
+def parse_rdm_sensor_definition(data: bytes) -> RdmSensorDefinition:
+    """Parse an ANSI E1.20 SENSOR_DEFINITION response payload."""
+    if len(data) < 13:
+        raise OaseError(
+            f"RDM sensor definition too short: {len(data)} bytes"
+        )
+    return RdmSensorDefinition(
+        sensor_number=data[0],
+        sensor_type=data[1],
+        unit=data[2],
+        prefix=data[3],
+        range_min=struct.unpack_from(">h", data, 4)[0],
+        range_max=struct.unpack_from(">h", data, 6)[0],
+        normal_min=struct.unpack_from(">h", data, 8)[0],
+        normal_max=struct.unpack_from(">h", data, 10)[0],
+        recorded_value_support=data[12],
+        description=data[13:45].decode("utf-8", errors="replace").rstrip("\x00"),
+    )
+
+
+def parse_rdm_sensor_value(data: bytes) -> RdmSensorValue:
+    """Parse an ANSI E1.20 SENSOR_VALUE response payload."""
+    if len(data) < 9:
+        raise OaseError(f"RDM sensor value too short: {len(data)} bytes")
+    present, lowest, highest, recorded = struct.unpack_from(">hhhh", data, 1)
+    return RdmSensorValue(
+        sensor_number=data[0],
+        present=present,
+        lowest=lowest,
+        highest=highest,
+        recorded=recorded,
+    )
+
+
+def scale_rdm_sensor_value(
+    definition: RdmSensorDefinition,
+    value: RdmSensorValue,
+) -> float:
+    """Apply the SI prefix declared by an RDM sensor definition."""
+    if value.sensor_number != definition.sensor_number:
+        raise OaseError(
+            "RDM sensor number mismatch: "
+            f"definition {definition.sensor_number}, value {value.sensor_number}"
+        )
+    try:
+        factor = RDM_PREFIX_FACTORS[definition.prefix]
+    except KeyError as exc:
+        raise OaseError(
+            f"Unsupported RDM sensor prefix 0x{definition.prefix:02X}"
+        ) from exc
+    return value.present * factor
+
+
 def _generate_certificate(directory: Path) -> tuple[Path, Path]:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name(
@@ -609,6 +720,10 @@ class OaseController:
         self._udp: Optional[socket.socket] = None
         self._tls: Optional[TlsCallbackServer] = None
         self._rdm_transaction = 0
+        self._egc_telemetry_sensors: dict[
+            bytes,
+            tuple[Optional[RdmSensorDefinition], Optional[RdmSensorDefinition]],
+        ] = {}
 
     def _udp_request(self, packet_type: int, payload: bytes = b"") -> Packet:
         if self._udp is None:
@@ -794,8 +909,121 @@ class OaseController:
             )
         return result.devices[0]
 
+    def get_rdm_sensor_definition(
+        self,
+        device: EgcDevice,
+        sensor_number: int,
+    ) -> RdmSensorDefinition:
+        if sensor_number not in range(256):
+            raise ValueError("sensor number must be 0-255")
+        reply = self.rdm_get(
+            device.uid,
+            RDM_SENSOR_DEFINITION,
+            bytes((sensor_number,)),
+        )
+        definition = parse_rdm_sensor_definition(reply.parameter_data)
+        if definition.sensor_number != sensor_number:
+            raise OaseError(
+                "RDM sensor definition number mismatch: "
+                f"requested {sensor_number}, received {definition.sensor_number}"
+            )
+        return definition
+
+    def get_rdm_sensor_value(
+        self,
+        device: EgcDevice,
+        definition: RdmSensorDefinition,
+    ) -> float:
+        reply = self.rdm_get(
+            device.uid,
+            RDM_SENSOR_VALUE,
+            bytes((definition.sensor_number,)),
+        )
+        value = parse_rdm_sensor_value(reply.parameter_data)
+        return scale_rdm_sensor_value(definition, value)
+
+    def _discover_egc_telemetry_sensors(
+        self,
+        device: EgcDevice,
+    ) -> tuple[Optional[RdmSensorDefinition], Optional[RdmSensorDefinition]]:
+        cached = self._egc_telemetry_sensors.get(device.uid)
+        if cached is not None:
+            return cached
+
+        rpm_definition = None
+        watts_definition = None
+        try:
+            info = self.rdm_get(device.uid, RDM_DEVICE_INFO)
+            if len(info.parameter_data) < 19:
+                raise OaseError(
+                    "RDM DEVICE_INFO reply did not include the sensor count"
+                )
+            sensor_count = info.parameter_data[18]
+        except OaseError as exc:
+            LOG.warning("Unable to discover EGC telemetry sensors: %s", exc)
+            result = (None, None)
+            self._egc_telemetry_sensors[device.uid] = result
+            return result
+
+        for sensor_number in range(sensor_count):
+            try:
+                definition = self.get_rdm_sensor_definition(device, sensor_number)
+            except OaseError as exc:
+                LOG.debug(
+                    "Unable to read EGC sensor definition %d: %s",
+                    sensor_number,
+                    exc,
+                )
+                continue
+
+            description = definition.description.casefold()
+            if watts_definition is None and (
+                definition.unit == RDM_SENSOR_UNIT_WATTS
+                or "watt" in description
+                or (
+                    definition.sensor_type == RDM_SENSOR_TYPE_POWER
+                    and "power" in description
+                )
+            ):
+                watts_definition = definition
+            if rpm_definition is None and (
+                definition.sensor_type == RDM_SENSOR_TYPE_ANGULAR_VELOCITY
+                or "rpm" in description
+                or "rotation" in description
+                or "revolution" in description
+            ):
+                rpm_definition = definition
+            if rpm_definition is not None and watts_definition is not None:
+                break
+
+        result = (rpm_definition, watts_definition)
+        self._egc_telemetry_sensors[device.uid] = result
+        return result
+
+    def _get_egc_telemetry(
+        self,
+        device: EgcDevice,
+    ) -> tuple[Optional[float], Optional[float]]:
+        rpm_definition, watts_definition = self._discover_egc_telemetry_sensors(
+            device
+        )
+
+        def read(
+            definition: Optional[RdmSensorDefinition],
+            label: str,
+        ) -> Optional[float]:
+            if definition is None:
+                return None
+            try:
+                return self.get_rdm_sensor_value(device, definition)
+            except OaseError as exc:
+                LOG.warning("Unable to read EGC %s: %s", label, exc)
+                return None
+
+        return read(rpm_definition, "RPM"), read(watts_definition, "watts")
+
     def get_egc_state(self, device: Optional[EgcDevice] = None) -> EgcState:
-        """Read on/off and power state for one attached EGC device."""
+        """Read control state and available live telemetry for one EGC device."""
         if device is None:
             device = self.get_single_egc_device()
 
@@ -808,10 +1036,13 @@ class OaseController:
 
         raw_power = power_reply.parameter_data[0]
         power = 0 if raw_power == 0 else (raw_power * 100 + 254) // 255
+        rpm, watts = self._get_egc_telemetry(device)
         return EgcState(
             device=device,
             on=bool(on_reply.parameter_data[0]),
             power=power,
+            rpm=rpm,
+            watts=watts,
         )
 
     def close(self) -> None:
@@ -933,9 +1164,13 @@ def _format_state(state: OutletState) -> str:
 
 
 def _format_egc_state(state: EgcState) -> str:
+    rpm = "unavailable" if state.rpm is None else f"{state.rpm:g}"
+    watts = "unavailable" if state.watts is None else f"{state.watts:g}"
     return (
         f"egc={'on' if state.on else 'off'}\n"
         f"power={state.power}\n"
+        f"rpm={rpm}\n"
+        f"watts={watts}\n"
         f"uid={state.device.uid_text}"
     )
 
