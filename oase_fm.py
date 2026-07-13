@@ -952,6 +952,8 @@ class OaseController:
 
         rpm_definition = None
         watts_definition = None
+        rpm_rank = 0
+        watts_rank = 0
         try:
             info = self.rdm_get(device.uid, RDM_DEVICE_INFO)
             if len(info.parameter_data) < 19:
@@ -977,27 +979,53 @@ class OaseController:
                 continue
 
             description = definition.description.casefold()
-            if watts_definition is None and (
-                definition.unit == RDM_SENSOR_UNIT_WATTS
-                or "watt" in description
-                or (
-                    definition.sensor_type == RDM_SENSOR_TYPE_POWER
-                    and "power" in description
-                )
+            if "watt" in description or "consumption" in description:
+                candidate_watts_rank = 3
+            elif definition.unit == RDM_SENSOR_UNIT_WATTS:
+                candidate_watts_rank = 2
+            elif (
+                definition.sensor_type == RDM_SENSOR_TYPE_POWER
+                and "power" in description
             ):
+                candidate_watts_rank = 1
+            else:
+                candidate_watts_rank = 0
+            if candidate_watts_rank > watts_rank:
                 watts_definition = definition
-            if rpm_definition is None and (
-                definition.sensor_type == RDM_SENSOR_TYPE_ANGULAR_VELOCITY
-                or "rpm" in description
-                or "rotation" in description
-                or "revolution" in description
+                watts_rank = candidate_watts_rank
+
+            if any(
+                word in description
+                for word in ("rpm", "rotation", "revolution")
             ):
+                candidate_rpm_rank = 3
+            elif (
+                definition.sensor_type == RDM_SENSOR_TYPE_ANGULAR_VELOCITY
+                and "speed" in description
+            ):
+                candidate_rpm_rank = 2
+            elif definition.sensor_type == RDM_SENSOR_TYPE_ANGULAR_VELOCITY:
+                candidate_rpm_rank = 1
+            else:
+                candidate_rpm_rank = 0
+            if candidate_rpm_rank > rpm_rank:
                 rpm_definition = definition
-            if rpm_definition is not None and watts_definition is not None:
-                break
+                rpm_rank = candidate_rpm_rank
 
         result = (rpm_definition, watts_definition)
         self._egc_telemetry_sensors[device.uid] = result
+        if rpm_definition is not None:
+            LOG.info(
+                "Using EGC RPM sensor %d (%s)",
+                rpm_definition.sensor_number,
+                rpm_definition.description or "unnamed",
+            )
+        if watts_definition is not None:
+            LOG.info(
+                "Using EGC wattage sensor %d (%s)",
+                watts_definition.sensor_number,
+                watts_definition.description or "unnamed",
+            )
         return result
 
     def _get_egc_telemetry(
