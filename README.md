@@ -65,7 +65,7 @@ python3 -m unittest -v
 ## Acknowledgement
 
 The working UDP/TLS connection, authentication, live-scene reading, and socket
-control implementation was based on
+control implementation was heavily based on work from
 [mr-suw/ioBroker.oasecontrol](https://github.com/mr-suw/ioBroker.oasecontrol),
 published under the MIT License. Additional EGC/RDM behavior was derived from
 the OASE application libraries and tested against local hardware.
