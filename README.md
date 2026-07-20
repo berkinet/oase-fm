@@ -27,7 +27,8 @@ export OASE_PASSWORD='your-app-password'
 
 ## Status
 
-Read the FM-Master outlets and attached EGC state:
+Read the FM-Master outlets, controller Wi-Fi RSSI in dBm, and attached EGC
+state:
 
 ```bash
 python3 oase_control.py --device-ip 192.168.5.176 --local-ip 192.168.5.10 status

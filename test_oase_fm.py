@@ -57,6 +57,47 @@ class ProtocolTests(unittest.TestCase):
             bytes.fromhex("04000000000000000064020480"),
         )
 
+    def test_modern_alive_reply_exposes_signed_rssi_and_increments(self):
+        payload = (
+            b"217200019384"
+            + bytes(20)
+            + struct.pack("<bBHB", -57, 1, 3, 9)
+        )
+
+        state = oase_fm.parse_alive(payload)
+
+        self.assertEqual(state.serial_number, "217200019384")
+        self.assertEqual(state.rssi, -57)
+        self.assertEqual(state.increments, ((3, 9),))
+
+    def test_legacy_alive_reply_has_no_rssi(self):
+        state = oase_fm.parse_alive(b"217200019384" + bytes(20) + b"\x07")
+
+        self.assertIsNone(state.rssi)
+        self.assertEqual(state.increments, ())
+
+    def test_get_controller_state_uses_alive_request(self):
+        controller = oase_fm.OaseController("192.0.2.1", "192.0.2.2", "pw")
+        controller._tls_request = Mock(
+            return_value=Mock(
+                packet_type=oase_fm.ALIVE_REPLY,
+                payload=b"x" * 32 + b"\xc7\x00",
+            )
+        )
+
+        state = controller.get_controller_state()
+
+        controller._tls_request.assert_called_once_with(oase_fm.ALIVE)
+        self.assertEqual(state.rssi, -57)
+
+    def test_controller_state_format(self):
+        state = oase_fm.ControllerState("217200019384", -57)
+
+        self.assertEqual(
+            oase_fm._format_controller_state(state),
+            "controller_rssi=-57",
+        )
+
     def test_egc_state_format(self):
         device = oase_fm.EgcDevice(123, 456, 0x4F41, 1)
         state = oase_fm.EgcState(
