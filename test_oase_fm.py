@@ -106,11 +106,16 @@ class ProtocolTests(unittest.TestCase):
             power=50,
             rpm=2345,
             watts=78,
+            module_temperature=24,
+            pcb_temperature=31,
+            water_temperature=18,
         )
 
         self.assertEqual(
             oase_fm._format_egc_state(state),
-            "egc=on\npower=50\nrpm=2345\nwatts=78\nuid=4F41:000001C8",
+            "egc=on\npower=50\nrpm=2345\nwatts=78\n"
+            "module_temperature=24\npcb_temperature=31\n"
+            "water_temperature=18\nuid=4F41:000001C8",
         )
 
     def test_rdm_sensor_definition_and_value_parsing(self):
@@ -161,8 +166,26 @@ class ProtocolTests(unittest.TestCase):
             + struct.pack(">hhhhB", 0, 500, 0, 500, 0)
             + b"Power"
         )
+        module_temperature_definition = (
+            bytes((3, oase_fm.RDM_SENSOR_TYPE_TEMPERATURE,
+                   oase_fm.RDM_SENSOR_UNIT_CELSIUS, 0))
+            + struct.pack(">hhhhB", -20, 100, -10, 90, 0)
+            + b"Temp Modul"
+        )
+        pcb_temperature_definition = (
+            bytes((4, oase_fm.RDM_SENSOR_TYPE_TEMPERATURE,
+                   oase_fm.RDM_SENSOR_UNIT_CELSIUS, 0))
+            + struct.pack(">hhhhB", -20, 100, -10, 90, 0)
+            + b"Temp_PCB"
+        )
+        water_temperature_definition = (
+            bytes((5, oase_fm.RDM_SENSOR_TYPE_TEMPERATURE,
+                   oase_fm.RDM_SENSOR_UNIT_CELSIUS, 0))
+            + struct.pack(">hhhhB", -25, 60, -20, 50, 0)
+            + b"Temp Water"
+        )
         device_info = bytearray(19)
-        device_info[18] = 3
+        device_info[18] = 6
 
         def rdm_get(_uid, parameter_id, parameter_data=b""):
             if parameter_id == 0x1010:
@@ -176,10 +199,19 @@ class ProtocolTests(unittest.TestCase):
                     b"\x00": nominal_speed_definition,
                     b"\x01": rpm_definition,
                     b"\x02": watts_definition,
+                    b"\x03": module_temperature_definition,
+                    b"\x04": pcb_temperature_definition,
+                    b"\x05": water_temperature_definition,
                 }
                 return Mock(parameter_data=definitions[parameter_data])
             if parameter_id == oase_fm.RDM_SENSOR_VALUE:
-                present = 2345 if parameter_data == b"\x01" else 78
+                present = {
+                    b"\x01": 2345,
+                    b"\x02": 78,
+                    b"\x03": 24,
+                    b"\x04": 31,
+                    b"\x05": 18,
+                }[parameter_data]
                 return Mock(
                     parameter_data=parameter_data
                     + struct.pack(">hhhh", present, present, present, present)
@@ -194,6 +226,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(state.power, 51)
         self.assertEqual(state.rpm, 2345)
         self.assertEqual(state.watts, 78)
+        self.assertEqual(state.module_temperature, 24)
+        self.assertEqual(state.pcb_temperature, 31)
+        self.assertEqual(state.water_temperature, 18)
 
     def test_missing_telemetry_does_not_break_egc_state(self):
         controller = oase_fm.OaseController("192.0.2.1", "192.0.2.2", "pw")
@@ -210,6 +245,9 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertIsNone(state.rpm)
         self.assertIsNone(state.watts)
+        self.assertIsNone(state.module_temperature)
+        self.assertIsNone(state.pcb_temperature)
+        self.assertIsNone(state.water_temperature)
 
 
 class CliContractTests(unittest.TestCase):

@@ -63,8 +63,10 @@ RDM_SOURCE_UID = bytes.fromhex("000000000001")
 RDM_DEVICE_INFO = 0x0060
 RDM_SENSOR_DEFINITION = 0x0200
 RDM_SENSOR_VALUE = 0x0201
+RDM_SENSOR_TYPE_TEMPERATURE = 0x00
 RDM_SENSOR_TYPE_POWER = 0x05
 RDM_SENSOR_TYPE_ANGULAR_VELOCITY = 0x15
+RDM_SENSOR_UNIT_CELSIUS = 0x01
 RDM_SENSOR_UNIT_WATTS = 0x0A
 
 RDM_PREFIX_FACTORS = {
@@ -173,6 +175,9 @@ class EgcState:
     power: int
     rpm: Optional[float] = None
     watts: Optional[float] = None
+    module_temperature: Optional[float] = None
+    pcb_temperature: Optional[float] = None
+    water_temperature: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +201,15 @@ class RdmSensorValue:
     lowest: int
     highest: int
     recorded: int
+
+
+@dataclass(frozen=True)
+class EgcTelemetrySensors:
+    rpm: Optional[RdmSensorDefinition] = None
+    watts: Optional[RdmSensorDefinition] = None
+    module_temperature: Optional[RdmSensorDefinition] = None
+    pcb_temperature: Optional[RdmSensorDefinition] = None
+    water_temperature: Optional[RdmSensorDefinition] = None
 
 
 @dataclass(frozen=True)
@@ -766,10 +780,7 @@ class OaseController:
         self._udp: Optional[socket.socket] = None
         self._tls: Optional[TlsCallbackServer] = None
         self._rdm_transaction = 0
-        self._egc_telemetry_sensors: dict[
-            bytes,
-            tuple[Optional[RdmSensorDefinition], Optional[RdmSensorDefinition]],
-        ] = {}
+        self._egc_telemetry_sensors: dict[bytes, EgcTelemetrySensors] = {}
 
     def _udp_request(self, packet_type: int, payload: bytes = b"") -> Packet:
         if self._udp is None:
@@ -999,13 +1010,16 @@ class OaseController:
     def _discover_egc_telemetry_sensors(
         self,
         device: EgcDevice,
-    ) -> tuple[Optional[RdmSensorDefinition], Optional[RdmSensorDefinition]]:
+    ) -> EgcTelemetrySensors:
         cached = self._egc_telemetry_sensors.get(device.uid)
         if cached is not None:
             return cached
 
         rpm_definition = None
         watts_definition = None
+        module_temperature_definition = None
+        pcb_temperature_definition = None
+        water_temperature_definition = None
         rpm_rank = 0
         watts_rank = 0
         try:
@@ -1017,7 +1031,7 @@ class OaseController:
             sensor_count = info.parameter_data[18]
         except OaseError as exc:
             LOG.warning("Unable to discover EGC telemetry sensors: %s", exc)
-            result = (None, None)
+            result = EgcTelemetrySensors()
             self._egc_telemetry_sensors[device.uid] = result
             return result
 
@@ -1073,7 +1087,24 @@ class OaseController:
                 rpm_definition = definition
                 rpm_rank = candidate_rpm_rank
 
-        result = (rpm_definition, watts_definition)
+            if (
+                definition.sensor_type == RDM_SENSOR_TYPE_TEMPERATURE
+                and definition.unit == RDM_SENSOR_UNIT_CELSIUS
+            ):
+                if "water" in compact_description:
+                    water_temperature_definition = definition
+                elif "pcb" in compact_description:
+                    pcb_temperature_definition = definition
+                elif "modul" in compact_description:
+                    module_temperature_definition = definition
+
+        result = EgcTelemetrySensors(
+            rpm=rpm_definition,
+            watts=watts_definition,
+            module_temperature=module_temperature_definition,
+            pcb_temperature=pcb_temperature_definition,
+            water_temperature=water_temperature_definition,
+        )
         self._egc_telemetry_sensors[device.uid] = result
         if rpm_definition is not None:
             LOG.info(
@@ -1087,15 +1118,31 @@ class OaseController:
                 watts_definition.sensor_number,
                 watts_definition.description or "unnamed",
             )
+        for label, definition in (
+            ("module temperature", module_temperature_definition),
+            ("PCB temperature", pcb_temperature_definition),
+            ("water temperature", water_temperature_definition),
+        ):
+            if definition is not None:
+                LOG.info(
+                    "Using EGC %s sensor %d (%s)",
+                    label,
+                    definition.sensor_number,
+                    definition.description or "unnamed",
+                )
         return result
 
     def _get_egc_telemetry(
         self,
         device: EgcDevice,
-    ) -> tuple[Optional[float], Optional[float]]:
-        rpm_definition, watts_definition = self._discover_egc_telemetry_sensors(
-            device
-        )
+    ) -> tuple[
+        Optional[float],
+        Optional[float],
+        Optional[float],
+        Optional[float],
+        Optional[float],
+    ]:
+        sensors = self._discover_egc_telemetry_sensors(device)
 
         def read(
             definition: Optional[RdmSensorDefinition],
@@ -1109,7 +1156,13 @@ class OaseController:
                 LOG.warning("Unable to read EGC %s: %s", label, exc)
                 return None
 
-        return read(rpm_definition, "RPM"), read(watts_definition, "watts")
+        return (
+            read(sensors.rpm, "RPM"),
+            read(sensors.watts, "watts"),
+            read(sensors.module_temperature, "module temperature"),
+            read(sensors.pcb_temperature, "PCB temperature"),
+            read(sensors.water_temperature, "water temperature"),
+        )
 
     def get_egc_state(self, device: Optional[EgcDevice] = None) -> EgcState:
         """Read control state and available live telemetry for one EGC device."""
@@ -1125,13 +1178,22 @@ class OaseController:
 
         raw_power = power_reply.parameter_data[0]
         power = 0 if raw_power == 0 else (raw_power * 100 + 254) // 255
-        rpm, watts = self._get_egc_telemetry(device)
+        (
+            rpm,
+            watts,
+            module_temperature,
+            pcb_temperature,
+            water_temperature,
+        ) = self._get_egc_telemetry(device)
         return EgcState(
             device=device,
             on=bool(on_reply.parameter_data[0]),
             power=power,
             rpm=rpm,
             watts=watts,
+            module_temperature=module_temperature,
+            pcb_temperature=pcb_temperature,
+            water_temperature=water_temperature,
         )
 
     def close(self) -> None:
@@ -1260,11 +1322,29 @@ def _format_controller_state(state: ControllerState) -> str:
 def _format_egc_state(state: EgcState) -> str:
     rpm = "unavailable" if state.rpm is None else f"{state.rpm:g}"
     watts = "unavailable" if state.watts is None else f"{state.watts:g}"
+    module_temperature = (
+        "unavailable"
+        if state.module_temperature is None
+        else f"{state.module_temperature:g}"
+    )
+    pcb_temperature = (
+        "unavailable"
+        if state.pcb_temperature is None
+        else f"{state.pcb_temperature:g}"
+    )
+    water_temperature = (
+        "unavailable"
+        if state.water_temperature is None
+        else f"{state.water_temperature:g}"
+    )
     return (
         f"egc={'on' if state.on else 'off'}\n"
         f"power={state.power}\n"
         f"rpm={rpm}\n"
         f"watts={watts}\n"
+        f"module_temperature={module_temperature}\n"
+        f"pcb_temperature={pcb_temperature}\n"
+        f"water_temperature={water_temperature}\n"
         f"uid={state.device.uid_text}"
     )
 
