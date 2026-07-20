@@ -4,7 +4,8 @@ Local Python control for the OASE InScenio FM-Master EGC.
 
 The project provides a reusable `oase_fm` module and a small command-line
 interface for reading FM-Master outlet and attached EGC state, changing outlet
-and EGC settings, discovering EGC devices, reading EGC RPM and wattage sensors,
+and EGC settings, discovering EGC devices, reading EGC RPM, wattage, and
+temperature sensors,
 and issuing low-level RDM requests.
 
 ## Requirements
@@ -35,7 +36,8 @@ python3 oase_control.py --device-ip 192.168.5.176 --local-ip 192.168.5.10 status
 ```
 
 For EGC pumps that expose standard RDM telemetry sensors, the EGC status also
-includes the current RPM and power consumption in watts. Sensor numbers are
+includes the current RPM, power consumption in watts, and available module,
+PCB, and water temperatures in degrees Celsius. Sensor numbers are
 discovered from the device definitions rather than assumed, and unsupported
 telemetry is reported as unavailable.
 
