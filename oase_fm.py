@@ -38,6 +38,7 @@ TLS_PORT = 5999
 
 DISCOVERY = 4096
 ALIVE = 4352
+ALIVE_REPLY = 4607
 TCP_REQ = 5120
 PASSWORD_CHECK = 40704
 SET_LIVE_SCENE = 50176
@@ -127,6 +128,13 @@ class OutletState:
     outlet3: bool
     outlet4: bool
     dimmer4: int
+
+
+@dataclass(frozen=True)
+class ControllerState:
+    serial_number: str
+    rssi: Optional[int]
+    increments: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -259,6 +267,38 @@ def parse_discovery(payload: bytes) -> Discovery:
         wifi_channel=payload[196],
         network_type=payload[197],
         status=_cstring(payload[199:323]),
+    )
+
+
+def parse_alive(payload: bytes) -> ControllerState:
+    """Parse an OASE AliveReply, including RSSI on modern controllers."""
+    if len(payload) < 33:
+        raise OaseError(f"Alive reply too short: {len(payload)} bytes")
+
+    serial_number = _cstring(payload[:12])
+    if len(payload) == 33:
+        # The legacy 33-byte reply ends with only the device-table increment.
+        return ControllerState(serial_number=serial_number, rssi=None)
+
+    rssi = struct.unpack_from("<b", payload, 32)[0]
+    increment_count = payload[33]
+    expected = 34 + increment_count * 3
+    if len(payload) < expected:
+        raise OaseError(
+            f"Incomplete Alive reply: expected {expected} bytes, got {len(payload)}"
+        )
+
+    increments = tuple(
+        (
+            struct.unpack_from("<H", payload, 34 + index * 3)[0],
+            payload[36 + index * 3],
+        )
+        for index in range(increment_count)
+    )
+    return ControllerState(
+        serial_number=serial_number,
+        rssi=rssi,
+        increments=increments,
     )
 
 
@@ -796,6 +836,14 @@ class OaseController:
         reply = self._tls_request(GET_LIVE_SCENE, make_get_scene_payload())
         return parse_outlets(parse_live_scene(reply.payload))
 
+    def get_controller_state(self) -> ControllerState:
+        reply = self._tls_request(ALIVE)
+        if reply.packet_type != ALIVE_REPLY:
+            raise OaseError(
+                f"Unexpected Alive reply type: 0x{reply.packet_type:04X}"
+            )
+        return parse_alive(reply.payload)
+
     def set_item(self, item_id: int, value: int) -> None:
         reply = self._tls_request(SET_LIVE_SCENE, make_set_scene_payload(item_id, value))
         if not reply.payload or reply.payload[0] != 1:
@@ -1204,6 +1252,11 @@ def _format_state(state: OutletState) -> str:
     )
 
 
+def _format_controller_state(state: ControllerState) -> str:
+    rssi = "unavailable" if state.rssi is None else str(state.rssi)
+    return f"controller_rssi={rssi}"
+
+
 def _format_egc_state(state: EgcState) -> str:
     rpm = "unavailable" if state.rpm is None else f"{state.rpm:g}"
     watts = "unavailable" if state.watts is None else f"{state.watts:g}"
@@ -1390,6 +1443,7 @@ def main() -> int:
         if args.command == "status":
             print(
                 f"{_format_state(ctl.get_state())}\n"
+                f"{_format_controller_state(ctl.get_controller_state())}\n"
                 f"{_format_egc_state(ctl.get_egc_state())}"
             )
 
