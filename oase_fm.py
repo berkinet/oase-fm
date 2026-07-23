@@ -68,6 +68,14 @@ RDM_SENSOR_TYPE_POWER = 0x05
 RDM_SENSOR_TYPE_ANGULAR_VELOCITY = 0x15
 RDM_SENSOR_UNIT_CELSIUS = 0x01
 RDM_SENSOR_UNIT_WATTS = 0x0A
+RDM_SFC_ENABLED = 0x8038
+RDM_SFC_MODE_SENSOR = 9
+
+SFC_MODES = {
+    0: "Maximum",
+    1: "Medium",
+    2: "Minimum",
+}
 
 RDM_PREFIX_FACTORS = {
     0x00: 1.0,
@@ -178,6 +186,8 @@ class EgcState:
     module_temperature: Optional[float] = None
     pcb_temperature: Optional[float] = None
     water_temperature: Optional[float] = None
+    sfc_enabled: Optional[bool] = None
+    sfc_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +220,7 @@ class EgcTelemetrySensors:
     module_temperature: Optional[RdmSensorDefinition] = None
     pcb_temperature: Optional[RdmSensorDefinition] = None
     water_temperature: Optional[RdmSensorDefinition] = None
+    sfc_mode: Optional[RdmSensorDefinition] = None
 
 
 @dataclass(frozen=True)
@@ -1020,6 +1031,7 @@ class OaseController:
         module_temperature_definition = None
         pcb_temperature_definition = None
         water_temperature_definition = None
+        sfc_mode_definition = None
         rpm_rank = 0
         watts_rank = 0
         try:
@@ -1050,6 +1062,11 @@ class OaseController:
             compact_description = "".join(
                 character for character in description if character.isalnum()
             )
+            if (
+                "sfcfunction" in compact_description
+                or definition.sensor_number == RDM_SFC_MODE_SENSOR
+            ):
+                sfc_mode_definition = definition
             if "watt" in description or "consumption" in description:
                 candidate_watts_rank = 3
             elif definition.unit == RDM_SENSOR_UNIT_WATTS:
@@ -1104,6 +1121,7 @@ class OaseController:
             module_temperature=module_temperature_definition,
             pcb_temperature=pcb_temperature_definition,
             water_temperature=water_temperature_definition,
+            sfc_mode=sfc_mode_definition,
         )
         self._egc_telemetry_sensors[device.uid] = result
         if rpm_definition is not None:
@@ -1130,6 +1148,12 @@ class OaseController:
                     definition.sensor_number,
                     definition.description or "unnamed",
                 )
+        if sfc_mode_definition is not None:
+            LOG.info(
+                "Using EGC SFC mode sensor %d (%s)",
+                sfc_mode_definition.sensor_number,
+                sfc_mode_definition.description or "unnamed",
+            )
         return result
 
     def _get_egc_telemetry(
@@ -1141,6 +1165,7 @@ class OaseController:
         Optional[float],
         Optional[float],
         Optional[float],
+        Optional[str],
     ]:
         sensors = self._discover_egc_telemetry_sensors(device)
 
@@ -1156,12 +1181,20 @@ class OaseController:
                 LOG.warning("Unable to read EGC %s: %s", label, exc)
                 return None
 
+        sfc_mode = None
+        raw_sfc_mode = read(sensors.sfc_mode, "SFC mode")
+        if raw_sfc_mode is not None:
+            sfc_mode = SFC_MODES.get(int(raw_sfc_mode))
+            if sfc_mode is None:
+                LOG.warning("EGC reported unknown SFC mode value %s", raw_sfc_mode)
+
         return (
             read(sensors.rpm, "RPM"),
             read(sensors.watts, "watts"),
             read(sensors.module_temperature, "module temperature"),
             read(sensors.pcb_temperature, "PCB temperature"),
             read(sensors.water_temperature, "water temperature"),
+            sfc_mode,
         )
 
     def get_egc_state(self, device: Optional[EgcDevice] = None) -> EgcState:
@@ -1184,7 +1217,20 @@ class OaseController:
             module_temperature,
             pcb_temperature,
             water_temperature,
+            sfc_mode,
         ) = self._get_egc_telemetry(device)
+        sfc_enabled = None
+        sensors = self._egc_telemetry_sensors.get(device.uid)
+        if sensors is not None and sensors.sfc_mode is not None:
+            try:
+                sfc_reply = self.rdm_get(device.uid, RDM_SFC_ENABLED)
+                if not sfc_reply.parameter_data:
+                    raise OaseError(
+                        "EGC SFC enabled reply contained no parameter data"
+                    )
+                sfc_enabled = bool(sfc_reply.parameter_data[0])
+            except OaseError as exc:
+                LOG.debug("Unable to read EGC SFC enabled state: %s", exc)
         return EgcState(
             device=device,
             on=bool(on_reply.parameter_data[0]),
@@ -1194,6 +1240,8 @@ class OaseController:
             module_temperature=module_temperature,
             pcb_temperature=pcb_temperature,
             water_temperature=water_temperature,
+            sfc_enabled=sfc_enabled,
+            sfc_mode=sfc_mode,
         )
 
     def close(self) -> None:
@@ -1337,6 +1385,12 @@ def _format_egc_state(state: EgcState) -> str:
         if state.water_temperature is None
         else f"{state.water_temperature:g}"
     )
+    sfc_enabled = (
+        "unavailable"
+        if state.sfc_enabled is None
+        else ("on" if state.sfc_enabled else "off")
+    )
+    sfc_mode = "unavailable" if state.sfc_mode is None else state.sfc_mode
     return (
         f"egc={'on' if state.on else 'off'}\n"
         f"power={state.power}\n"
@@ -1345,6 +1399,8 @@ def _format_egc_state(state: EgcState) -> str:
         f"module_temperature={module_temperature}\n"
         f"pcb_temperature={pcb_temperature}\n"
         f"water_temperature={water_temperature}\n"
+        f"sfc_enabled={sfc_enabled}\n"
+        f"sfc_mode={sfc_mode}\n"
         f"uid={state.device.uid_text}"
     )
 
