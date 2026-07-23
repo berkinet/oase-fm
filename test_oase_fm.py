@@ -109,13 +109,16 @@ class ProtocolTests(unittest.TestCase):
             module_temperature=24,
             pcb_temperature=31,
             water_temperature=18,
+            sfc_enabled=False,
+            sfc_mode="Maximum",
         )
 
         self.assertEqual(
             oase_fm._format_egc_state(state),
             "egc=on\npower=50\nrpm=2345\nwatts=78\n"
             "module_temperature=24\npcb_temperature=31\n"
-            "water_temperature=18\nuid=4F41:000001C8",
+            "water_temperature=18\nsfc_enabled=off\n"
+            "sfc_mode=Maximum\nuid=4F41:000001C8",
         )
 
     def test_rdm_sensor_definition_and_value_parsing(self):
@@ -184,14 +187,26 @@ class ProtocolTests(unittest.TestCase):
             + struct.pack(">hhhhB", -25, 60, -20, 50, 0)
             + b"Temp Water"
         )
+        unused_sensor_definition = (
+            bytes((0, 0x20, 0, 0))
+            + struct.pack(">hhhhB", 0, 0, 0, 0, 0)
+            + b"Unused"
+        )
+        sfc_mode_definition = (
+            bytes((9, 0x20, 0, 0))
+            + struct.pack(">hhhhB", 0, 2, 0, 2, 0)
+            + b"SFCFunction"
+        )
         device_info = bytearray(19)
-        device_info[18] = 6
+        device_info[18] = 10
 
         def rdm_get(_uid, parameter_id, parameter_data=b""):
             if parameter_id == 0x1010:
                 return Mock(parameter_data=b"\xff")
             if parameter_id == 0x8039:
                 return Mock(parameter_data=bytes((128,)))
+            if parameter_id == oase_fm.RDM_SFC_ENABLED:
+                return Mock(parameter_data=b"\x00")
             if parameter_id == oase_fm.RDM_DEVICE_INFO:
                 return Mock(parameter_data=bytes(device_info))
             if parameter_id == oase_fm.RDM_SENSOR_DEFINITION:
@@ -202,6 +217,10 @@ class ProtocolTests(unittest.TestCase):
                     b"\x03": module_temperature_definition,
                     b"\x04": pcb_temperature_definition,
                     b"\x05": water_temperature_definition,
+                    b"\x06": bytes((6,)) + unused_sensor_definition[1:],
+                    b"\x07": bytes((7,)) + unused_sensor_definition[1:],
+                    b"\x08": bytes((8,)) + unused_sensor_definition[1:],
+                    b"\x09": sfc_mode_definition,
                 }
                 return Mock(parameter_data=definitions[parameter_data])
             if parameter_id == oase_fm.RDM_SENSOR_VALUE:
@@ -211,6 +230,7 @@ class ProtocolTests(unittest.TestCase):
                     b"\x03": 24,
                     b"\x04": 31,
                     b"\x05": 18,
+                    b"\x09": 0,
                 }[parameter_data]
                 return Mock(
                     parameter_data=parameter_data
@@ -229,6 +249,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(state.module_temperature, 24)
         self.assertEqual(state.pcb_temperature, 31)
         self.assertEqual(state.water_temperature, 18)
+        self.assertFalse(state.sfc_enabled)
+        self.assertEqual(state.sfc_mode, "Maximum")
+        requested_pids = [
+            call.args[1] for call in controller.rdm_get.call_args_list
+        ]
+        self.assertIn(oase_fm.RDM_SFC_ENABLED, requested_pids)
 
     def test_missing_telemetry_does_not_break_egc_state(self):
         controller = oase_fm.OaseController("192.0.2.1", "192.0.2.2", "pw")
@@ -248,6 +274,22 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsNone(state.module_temperature)
         self.assertIsNone(state.pcb_temperature)
         self.assertIsNone(state.water_temperature)
+        self.assertIsNone(state.sfc_enabled)
+        self.assertIsNone(state.sfc_mode)
+        requested_pids = [
+            call.args[1] for call in controller.rdm_get.call_args_list
+        ]
+        self.assertNotIn(oase_fm.RDM_SFC_ENABLED, requested_pids)
+
+    def test_sfc_mode_mapping_matches_oase_app(self):
+        self.assertEqual(
+            oase_fm.SFC_MODES,
+            {
+                0: "Maximum",
+                1: "Medium",
+                2: "Minimum",
+            },
+        )
 
 
 class CliContractTests(unittest.TestCase):

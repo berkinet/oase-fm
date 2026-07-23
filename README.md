@@ -5,8 +5,12 @@ Local Python control for the OASE InScenio FM-Master EGC.
 The project provides a reusable `oase_fm` module and a small command-line
 interface for reading FM-Master outlet and attached EGC state, changing outlet
 and EGC settings, discovering EGC devices, reading EGC RPM, wattage, and
-temperature sensors,
-and issuing low-level RDM requests.
+temperature and Seasonal Flow Control status, and issuing low-level RDM
+requests.
+
+The broader device catalogue, PID notes, verification levels, and
+reverse-engineering status are maintained in
+[`OASE_EGC_Project_Documentation.md`](OASE_EGC_Project_Documentation.md).
 
 ## Requirements
 
@@ -40,6 +44,10 @@ includes the current RPM, power consumption in watts, and available module,
 PCB, and water temperatures in degrees Celsius. Sensor numbers are
 discovered from the device definitions rather than assumed, and unsupported
 telemetry is reported as unavailable.
+
+For pumps that expose OASE Seasonal Flow Control, status also reports whether
+SFC is enabled and the current automatic stage (`Maximum`, `Medium`, or
+`Minimum`). These values are read-only; the utility does not change SFC.
 
 ## Changing state
 
